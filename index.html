@@ -435,7 +435,7 @@
 
 <footer>
   <b>TetraLink</b>, créé par Michael Grulois<br>
-  Version 2.0 (livraison 3.1) — 02/11/2026<br>
+  Version 2.0 (livraison 3.2) — 02/11/2026<br>
   <button class="lien" onclick="ouvrirConfidentialite()">Politique de confidentialité</button>
 </footer>
 
@@ -1420,14 +1420,14 @@ function dessinerStats(){
 }
 
 // ── Export CSV anonyme (séparateur « ; » pour Excel en français) ──
-const ENTETE_CSV = ['Classe', 'Date', 'Heure', 'Élève', 'Connecté', 'Changements de statut', 'Temps OK (s)', 'Temps Attente (s)', 'Temps Aide (s)', 'Temps Expert (s)', "Demandes d'aide", 'Délai moyen de réponse (s)'];
-function lignesCSV(libelle, hist){
+const ENTETE_CSV = ['Classe', 'Enseignant', 'Date', 'Heure', 'Élève', 'Connecté', 'Changements de statut', 'Temps OK (s)', 'Temps Attente (s)', 'Temps Aide (s)', 'Temps Expert (s)', "Demandes d'aide", 'Délai moyen de réponse (s)'];
+function lignesCSV(libelle, hist, enseignant){
   const num = numerotation(Object.values(hist).flatMap(s => Object.keys(s)));
   const lignes = [];
   Object.keys(hist).sort((a, b) => dateSeance(a) - dateSeance(b)).forEach(id => {
     const d = dateSeance(id);
     Object.entries(hist[id]).sort((a, b) => num[a[0]].localeCompare(num[b[0]])).forEach(([c, h]) => {
-      lignes.push([libelle, fmtDate(d), heure(d), num[c], h.connecte ? 'oui' : 'non', h.nbChangements, h.dureeS1, h.dureeS2, h.dureeS3, h.dureeS4, h.nbAides, h.delaiAide >= 0 ? h.delaiAide : '']);
+      lignes.push([libelle, enseignant || '—', fmtDate(d), heure(d), num[c], h.connecte ? 'oui' : 'non', h.nbChangements, h.dureeS1, h.dureeS2, h.dureeS3, h.dureeS4, h.nbAides, h.delaiAide >= 0 ? h.delaiAide : '']);
     });
   });
   return lignes;
@@ -1470,10 +1470,30 @@ async function ouvrirVueEcole(){
       const nbEl = new Set(Object.values(cl).flatMap(s => Object.keys(s))).size;
       return `<tr><td>${echapper(classesEcole[id].libelle)}</td><td class="n">${Object.keys(cl).length}</td><td class="n">${nbEl}</td><td class="n">${pct(rc.connectes, rc.lignes)}</td><td class="n">${rc.aides}</td><td class="n">${fmtDuree(rc.delai)}</td><td>${barreStatuts(rc.tps)}</td></tr>`; }).join('') +
     '</tbody></table></div>';
+
+  // Adoption par enseignant (pseudonymisé) : usage de l'outil, pas d'évaluation
+  const ps = pseudosEnseignants(), parEns = {};
+  ids.forEach(id => {
+    const p = ps[classesEcole[id].proprio]; const cl = histEcole[id] || {};
+    const e = parEns[p] = parEns[p] || { classes: 0, classesActives: 0, seances: 0, duree: 0, derniere: 0, lignes: [] };
+    e.classes++; if (Object.keys(cl).length) e.classesActives++;
+    Object.entries(cl).forEach(([sid, sc]) => { e.seances++; e.duree += dureeSeance(sc); e.derniere = Math.max(e.derniere, dateSeance(sid)); e.lignes.push(...Object.values(sc)); });
+  });
+  html += `<h2>Adoption par enseignant</h2><div class="tableau-wrap"><table class="tab"><thead><tr><th>Enseignant</th><th>Classes (utilisées)</th><th>Séances</th><th>Temps d'utilisation</th><th>Durée moyenne</th><th>Dernière séance</th><th>Participation des élèves</th></tr></thead><tbody>` +
+    Object.keys(parEns).sort().map(p => { const e = parEns[p]; const re = resumer(e.lignes);
+      return `<tr><td>${p}</td><td class="n">${e.classes} (${e.classesActives})</td><td class="n">${e.seances}</td><td class="n">${fmtDuree(e.duree)}</td><td class="n">${e.seances ? fmtDuree(e.duree / e.seances) : '—'}</td><td class="n">${e.derniere ? fmtDate(e.derniere) : '—'}</td><td class="n">${pct(re.connectes, re.lignes)}</td></tr>`; }).join('') +
+    '</tbody></table></div><p class="aide-champ">Indicateurs d\'adoption de l\'outil, sous pseudonyme. Ils ne servent pas à évaluer les enseignants ; le délai de réponse n\'est présenté qu\'à l\'échelle de l\'école et des classes.</p>';
   $('contenuEcole').innerHTML = html;
 }
+// Pseudonymes des enseignants (A, B, C…) : jamais de nom ni d'e-mail
+function pseudosEnseignants(){
+  const uids = [...new Set(Object.values(classesEcole).map(c => c.proprio))].sort();
+  const m = {}; uids.forEach((u, i) => m[u] = 'Enseignant ' + (i < 26 ? String.fromCharCode(65 + i) : (i + 1)));
+  return m;
+}
 function exporterCSVEcole(){
-  const lignes = Object.keys(histEcole).flatMap(id => lignesCSV(classesEcole[id] ? classesEcole[id].libelle : id, histEcole[id]));
+  const ps = pseudosEnseignants();
+  const lignes = Object.keys(histEcole).flatMap(id => lignesCSV(classesEcole[id] ? classesEcole[id].libelle : id, histEcole[id], classesEcole[id] ? ps[classesEcole[id].proprio] : ''));
   if (!lignes.length){ message('msgCloture', 'att', 'Aucune donnée à exporter.'); return false; }
   telechargerCSV(lignes, `TetraLink_ecole_${new Date().toISOString().slice(0, 10)}.csv`);
   return true;
@@ -1533,7 +1553,7 @@ function ouvrirConfidentialite(){
     <h2>Qui peut voir quoi ?</h2>
     <ul>
       <li>L'enseignant : uniquement ses propres classes.</li>
-      <li>L'administrateur : les statistiques sans nom de toutes les classes ; jamais les noms ni les séances en direct des collègues.</li>
+      <li>L'administrateur : les statistiques sans nom de toutes les classes ; jamais les noms ni les séances en direct des collègues. Il voit aussi l'utilisation de l'outil par enseignant, sous un pseudonyme (Enseignant A, B…) : nombre de classes et de séances, durée d'utilisation, participation des élèves. Ces chiffres mesurent l'adoption de TetraLink et ne servent pas à évaluer les enseignants.</li>
       <li>Un élève : uniquement son propre statut.</li>
     </ul>
     <h2>Sécurité</h2>
