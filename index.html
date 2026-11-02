@@ -406,7 +406,7 @@
 
   <!-- ══ Vue école (administrateur) ══ -->
   <section id="vueEcole" class="cache">
-    <button class="lien" onclick="ouvrirClasses()" style="padding-left:0">← Mes classes</button>
+    <button class="lien" id="retourVueEcole" onclick="ouvrirClasses()" style="padding-left:0">← Mes classes</button>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0.5rem 0 1rem">
       <h1 style="margin:0">Vue école</h1>
       <button class="btn btn-petit" style="margin-left:auto" onclick="exporterCSVEcole()"><i class="ti ti-file-spreadsheet"></i> Export CSV anonyme (école)</button>
@@ -435,7 +435,7 @@
 
 <footer>
   <b>TetraLink</b>, créé par Michael Grulois<br>
-  Version 2.0 (livraison 3.2) — 02/11/2026<br>
+  Version 2.0 (livraison 3.3) — 02/11/2026<br>
   <button class="lien" onclick="ouvrirConfidentialite()">Politique de confidentialité</button>
 </footer>
 
@@ -468,7 +468,7 @@ auth.languageCode = 'fr';
 // Alphabet des codes : sans 0, O, 1, I, L (lisibilité DYS) – identique aux règles
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
-let utilisateur = null, ecole = null, estAdmin = false;
+let utilisateur = null, ecole = null, estAdmin = false, estProf = false;
 
 // ═════════════════════════════════════════════
 // POLITIQUE DE CONFIDENTIALITÉ – À COMPLÉTER POUR CHAQUE ÉCOLE
@@ -695,16 +695,19 @@ auth.onAuthStateChanged(async u => {
   if (!u){ utilisateur = null; if (!eleve) afficher('vueAccueil'); return; }
   if (u.isAnonymous){ utilisateur = null; if (!eleve) reprendreEleve(); return; }   // élève
   try {
-    // Vérifie que le compte est bien enseignant de cette école
-    const estProf = (await db.ref('enseignants/' + u.uid).once('value')).exists();
-    if (!estProf){ await auth.signOut(); afficher('vueConnexion'); message('msgConnexion', 'erreur', "Ce compte n'est pas autorisé dans cette école."); return; }
+    // Le compte doit être enseignant ou administrateur de cette école
+    const [snapProf, snapAdmin] = await Promise.all([db.ref('enseignants/' + u.uid).once('value'), db.ref('admins/' + u.uid).once('value')]);
+    estProf = snapProf.exists();
+    estAdmin = snapAdmin.val() === true;
+    if (!estProf && !estAdmin){ await auth.signOut(); afficher('vueConnexion'); message('msgConnexion', 'erreur', "Ce compte n'est pas autorisé dans cette école."); return; }
     utilisateur = u;
     ecole = (await db.ref('ecole').once('value')).val() || {};
     $('nomEcole').textContent = ecole.libelle || 'École';
-    $('nomProf').textContent = u.email;
+    $('nomProf').textContent = u.email + (estProf ? '' : ' · administrateur');
     $('anneeScolaire').textContent = 'Année scolaire ' + (ecole.annee || '');
-    estAdmin = (await db.ref('admins/' + u.uid).once('value')).val() === true;
     $('btnVueEcole').classList.toggle('cache', !estAdmin);
+    $('retourVueEcole').classList.toggle('cache', !estProf);
+    if (!estProf){ ouvrirVueEcole(); return; }   // administrateur seul : pas de classes, accès direct à la vue école
     ouvrirClasses();
     await initialiserNoms();   // phrase secrète + noms chiffrés
     archiverSeancesExpirees(); // séances oubliées : archivage puis effacement
@@ -1420,14 +1423,14 @@ function dessinerStats(){
 }
 
 // ── Export CSV anonyme (séparateur « ; » pour Excel en français) ──
-const ENTETE_CSV = ['Classe', 'Enseignant', 'Date', 'Heure', 'Élève', 'Connecté', 'Changements de statut', 'Temps OK (s)', 'Temps Attente (s)', 'Temps Aide (s)', 'Temps Expert (s)', "Demandes d'aide", 'Délai moyen de réponse (s)'];
+const ENTETE_CSV = ['École', 'Classe', 'Enseignant', 'Date', 'Heure', 'Élève', 'Connecté', 'Changements de statut', 'Temps OK (s)', 'Temps Attente (s)', 'Temps Aide (s)', 'Temps Expert (s)', "Demandes d'aide", 'Délai moyen de réponse (s)'];
 function lignesCSV(libelle, hist, enseignant){
   const num = numerotation(Object.values(hist).flatMap(s => Object.keys(s)));
   const lignes = [];
   Object.keys(hist).sort((a, b) => dateSeance(a) - dateSeance(b)).forEach(id => {
     const d = dateSeance(id);
     Object.entries(hist[id]).sort((a, b) => num[a[0]].localeCompare(num[b[0]])).forEach(([c, h]) => {
-      lignes.push([libelle, enseignant || '—', fmtDate(d), heure(d), num[c], h.connecte ? 'oui' : 'non', h.nbChangements, h.dureeS1, h.dureeS2, h.dureeS3, h.dureeS4, h.nbAides, h.delaiAide >= 0 ? h.delaiAide : '']);
+      lignes.push([(ecole && ecole.libelle) || '', libelle, enseignant || '—', fmtDate(d), heure(d), num[c], h.connecte ? 'oui' : 'non', h.nbChangements, h.dureeS1, h.dureeS2, h.dureeS3, h.dureeS4, h.nbAides, h.delaiAide >= 0 ? h.delaiAide : '']);
     });
   });
   return lignes;
