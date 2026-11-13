@@ -114,6 +114,8 @@
   .champ:focus { border-color: var(--exp); outline: none; }
   textarea.champ { min-height: 160px; resize: vertical; line-height: 1.6; }
   .aide-champ { font-size: 0.85rem; color: var(--texte3); margin-top: 4px; }
+  .case-partage { display: flex; align-items: center; gap: 8px; margin-top: 14px; cursor: pointer; }
+  .case-partage input { width: 18px; height: 18px; margin: 0; accent-color: var(--exp); }
   .rangee { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 1rem; }
 
   /* ── Messages ── */
@@ -278,6 +280,8 @@
         <input class="champ" type="email" id="email" autocomplete="username" required>
         <label for="mdp">Mot de passe</label>
         <input class="champ" type="password" id="mdp" autocomplete="current-password" required>
+        <label class="case-partage"><input type="checkbox" id="partage"> Ordinateur partagé (école)</label>
+        <p class="aide-champ">Rien n'est gardé sur cet appareil : la session se ferme avec l'onglet, les noms et la clé restent en mémoire.</p>
         <div id="msgConnexion"></div>
         <div class="rangee"><button class="btn btn-plein" type="submit" id="btnConnexion" style="width:100%"><i class="ti ti-login"></i> Se connecter</button></div>
       </form>
@@ -528,8 +532,23 @@ const ITERATIONS = 600000;
 const cleCache = () => 'tetralink-v2-noms-' + utilisateur.uid;   // noms déchiffrés (cet appareil)
 const cleMemo  = () => 'tetralink-v2-cle-' + utilisateur.uid;    // clé mémorisée (cet appareil)
 
-function lireNoms(){ if (!utilisateur) return {}; try { return JSON.parse(localStorage.getItem(cleCache())) || {}; } catch(e){ return {}; } }
-function ecrireNomsLocal(n){ try { localStorage.setItem(cleCache(), JSON.stringify(n)); return true; } catch(e){ return false; } }
+// Ordinateur partagé : session limitée à l'onglet, noms et clé en mémoire uniquement (rien dans localStorage)
+const CLE_PARTAGE = 'tetralink-partage';        // sessionStorage : mode de la session en cours
+const CLE_CHOIX_PARTAGE = 'tetralink-choix-partage'; // localStorage : dernier choix de la case (aucune donnée personnelle)
+let nomsMemoire = {};
+try { $('partage').checked = localStorage.getItem(CLE_CHOIX_PARTAGE) === '1'; } catch(e){}
+function estPartage(){ try { return sessionStorage.getItem(CLE_PARTAGE) === '1'; } catch(e){ return true; } }
+function effacerTraces(){ if (!utilisateur) return; try { localStorage.removeItem(cleCache()); localStorage.removeItem(cleMemo()); localStorage.removeItem('tetralink-v2-noms'); } catch(e){} }
+
+function lireNoms(){
+  if (!utilisateur) return {};
+  if (estPartage()) return JSON.parse(JSON.stringify(nomsMemoire));
+  try { return JSON.parse(localStorage.getItem(cleCache())) || {}; } catch(e){ return {}; }
+}
+function ecrireNomsLocal(n){
+  if (estPartage()){ nomsMemoire = JSON.parse(JSON.stringify(n)); return true; }
+  try { localStorage.setItem(cleCache(), JSON.stringify(n)); return true; } catch(e){ return false; }
+}
 function ecrireNoms(n){ const ok = ecrireNomsLocal(n); envoyerNoms(n); return ok; }
 function nomsClasse(id){ return lireNoms()[id] || {}; }
 
@@ -554,9 +573,11 @@ async function dechiffrer(enr, cle){
   return JSON.parse(new TextDecoder().decode(p));
 }
 async function memoriserCle(){
+  if (estPartage()) return;
   try { localStorage.setItem(cleMemo(), JSON.stringify({ sel: selActuel, cle: enB64(await crypto.subtle.exportKey('raw', cleCrypto)) })); } catch(e){}
 }
 async function lireCleMemo(sel){
+  if (estPartage()) return null;
   try {
     const m = JSON.parse(localStorage.getItem(cleMemo()));
     if (!m || m.sel !== sel) return null;
@@ -590,7 +611,8 @@ function migrerAncienCache(){
 
 // Au démarrage : récupérer et déchiffrer les noms, ou demander la phrase secrète
 async function initialiserNoms(){
-  migrerAncienCache();
+  if (estPartage()) effacerTraces();   // restes d'une ancienne session « personnelle » sur ce poste
+  else migrerAncienCache();
   const enr = (await db.ref('noms/' + utilisateur.uid).once('value')).val();
   if (!enr){ demanderCreationPhrase(false); return; }
   const cle = await lireCleMemo(enr.sel);
@@ -673,7 +695,12 @@ async function connexion(ev){
   ev.preventDefault();
   message('msgConnexion', '', '');
   const btn = $('btnConnexion'); btn.disabled = true;
+  const partage = $('partage').checked;
+  try { localStorage.setItem(CLE_CHOIX_PARTAGE, partage ? '1' : '0'); } catch(e){}
+  try { sessionStorage.setItem(CLE_PARTAGE, partage ? '1' : '0'); } catch(e){}
   try {
+    // Ordinateur partagé : la connexion ne survit pas à la fermeture de l'onglet
+    await auth.setPersistence(partage ? firebase.auth.Auth.Persistence.SESSION : firebase.auth.Auth.Persistence.LOCAL);
     await auth.signInWithEmailAndPassword($('email').value.trim(), $('mdp').value);
     // la suite est gérée par onAuthStateChanged
   } catch(e){
@@ -718,6 +745,7 @@ auth.onAuthStateChanged(async u => {
 
 // Déconnexion : sur un appareil partagé, on efface les noms et la clé mémorisée
 function deconnexion(direct){
+  if (estPartage()){ terminerDeconnexion(true); return; }   // rien à garder : on efface sans demander
   if (direct){ terminerDeconnexion(false); return; }
   ouvrirModale(`
     <h2>Se déconnecter</h2>
@@ -728,9 +756,10 @@ function deconnexion(direct){
     </div>`);
 }
 function terminerDeconnexion(effacer){
-  if (effacer && utilisateur){ try { localStorage.removeItem(cleCache()); localStorage.removeItem(cleMemo()); } catch(e){} }
+  if (effacer) effacerTraces();
   fermerModale(true); arreterEcoutes();
-  classes = {}; classeActive = null; cleCrypto = null; selActuel = null;
+  classes = {}; classeActive = null; cleCrypto = null; selActuel = null; nomsMemoire = {};
+  try { sessionStorage.removeItem(CLE_PARTAGE); } catch(e){}
   auth.signOut(); $('mdp').value = '';
 }
 
@@ -760,7 +789,7 @@ function ouvrirClasses(){
 
 function dessinerClasses(){
   const noms = lireNoms();
-  const ids = Object.keys(classes).filter(id => !classes[id].archivee)
+  const ids = Object.keys(classes).filter(id => RE_ID.test(id) && !classes[id].archivee)
     .sort((a, b) => classes[a].libelle.localeCompare(classes[b].libelle, 'fr', {numeric: true}));
   $('grilleClasses').innerHTML = ids.map(id => {
     const n = Object.keys(noms[id] || {}).length;
@@ -1018,6 +1047,9 @@ const GRACE = 7 * 24 * 3600 * 1000;         // 7 jours pour archiver une séance
 const SEUIL_ATTENTE = 60 * 1000;            // une demande est mise en évidence après 1 minute
 const TS = firebase.database.ServerValue.TIMESTAMP;
 const RE_CODE = /^[A-HJ-KM-NP-Z2-9]{6}$/;
+const RE_ID = /^[-0-9A-Za-z_]{20}$/;   // identifiant Firebase (push) : seul format accepté dans le HTML
+// Un état est affiché seulement si son statut est connu (1 à 4) : protège l'écran de l'enseignant
+const etatValide = e => (e && STATUTS[e.s]) ? e : null;
 // Heure du serveur (corrige l'horloge de l'appareil)
 let decalage = 0;
 db.ref('.info/serverTimeOffset').on('value', s => { decalage = s.val() || 0; });
@@ -1115,7 +1147,7 @@ function dessinerSeance(){
   // Toute la classe (gris pointillé = pas encore connecté)
   const codes = Object.keys(codesActifs).sort((a, b) => (noms[a] || a).localeCompare(noms[b] || b, 'fr'));
   $('grilleDirect').innerHTML = codes.map(code => {
-    const e = etatsSeance[code];
+    const e = etatValide(etatsSeance[code]);
     return `<div class="tuile-eleve-direct s${e ? e.s : 0}"><b>${nom(code)}</b><span>${e ? STATUTS[e.s].nom : 'Pas connecté'}</span></div>`;
   }).join('');
 }
@@ -1154,7 +1186,11 @@ async function validerFinSeance(){
 function calculerHistorique(codes, etats, evts, fin){
   const hist = {};
   codes.forEach(code => {
-    const e = evts.filter(x => x.c === code && typeof x.t === 'number').sort((a, b) => a.t - b.t);
+    // Un seul événement par élève et par instant : une rafale écrite en une seule requête compte pour un changement
+    const vus = new Set();
+    const e = evts.filter(x => x.c === code && typeof x.t === 'number' && x.s >= 1 && x.s <= 4)
+      .sort((a, b) => a.t - b.t)
+      .filter(x => !vus.has(x.t) && vus.add(x.t));
     const h = { connecte: !!etats[code] || e.length > 0, nbChangements: 0, dureeS1: 0, dureeS2: 0, dureeS3: 0, dureeS4: 0, nbAides: 0, delaiAide: -1 };
     const delais = [];
     e.forEach((x, i) => {
@@ -1228,7 +1264,7 @@ function afficherChoixClasse(){
 
 function dessinerChoixClasse(){
   // Seules les classes dont la séance est ouverte sont proposées
-  const ids = Object.keys(annuaireEleve).filter(id => annuaireEleve[id].seanceActive)
+  const ids = Object.keys(annuaireEleve).filter(id => RE_ID.test(id) && annuaireEleve[id].seanceActive && typeof annuaireEleve[id].libelle === 'string')
     .sort((a, b) => annuaireEleve[a].libelle.localeCompare(annuaireEleve[b].libelle, 'fr', {numeric: true}));
   $('grilleChoix').innerHTML = ids.map(id => `<button class="choix-classe" onclick="choisirClasse('${id}')">${echapper(annuaireEleve[id].libelle)}</button>`).join('');
   message('msgEleveClasse', ids.length ? '' : 'info', ids.length ? '' : "Aucune séance n'est ouverte. Attends que ton enseignant la démarre : ta classe apparaîtra ici.");
@@ -1281,7 +1317,7 @@ async function rejoindre(e){
 }
 
 function dessinerBoutons(){
-  $('etatActuel').innerHTML = monStatut ? `Tu es en <b>${STATUTS[monStatut].nom}</b>` : '';
+  $('etatActuel').innerHTML = STATUTS[monStatut] ? `Tu es en <b>${STATUTS[monStatut].nom}</b>` : '';
   $('boutonsTetra').innerHTML = [1, 2, 3, 4].map(k => `
     <button class="bt s${k} ${monStatut === k ? 'actif' : ''}" aria-pressed="${monStatut === k}" onclick="choisirStatut(${k})">
       <i class="ti ${STATUTS[k].icone}"></i><b>${STATUTS[k].nom}</b><span>${STATUTS[k].desc}</span>
@@ -1383,7 +1419,7 @@ async function ouvrirStats(){
 }
 
 function dessinerStats(){
-  const ids = Object.keys(histClasse).sort((a, b) => dateSeance(b) - dateSeance(a));
+  const ids = Object.keys(histClasse).filter(id => RE_ID.test(id)).sort((a, b) => dateSeance(b) - dateSeance(a));
   if (!ids.length){ $('contenuStats').innerHTML = `<div class="msg msg-info"><i class="ti ti-info-circle"></i><span>Aucune séance terminée pour l'instant. Les statistiques apparaissent après « Terminer la séance ».</span></div>`; return; }
   const noms = nomsClasse(classeActive);
   const nom = c => noms[c] ? echapper(noms[c]) : c;
@@ -1562,7 +1598,7 @@ function ouvrirConfidentialite(){
     <h2>Sécurité</h2>
     <p>Accès contrôlés par des règles sur le serveur, noms chiffrés (AES-256), connexion sécurisée (https), codes aléatoires, effacement automatique des séances.</p>
     <h2>Sur l'appareil</h2>
-    <p>L'appareil de l'enseignant garde une copie des noms et la clé de chiffrement, effacées s'il choisit « appareil partagé : tout effacer » à la déconnexion. L'appareil de l'élève garde sa classe et son code jusqu'à la fermeture de l'onglet.</p>
+    <p>Sur son appareil personnel, l'enseignant garde une copie des noms et la clé de chiffrement, effacées s'il choisit « appareil partagé : tout effacer » à la déconnexion. S'il coche « Ordinateur partagé » à la connexion, rien n'est enregistré sur l'appareil : la session se ferme avec l'onglet, et les noms comme la clé ne restent qu'en mémoire. L'appareil de l'élève garde sa classe et son code jusqu'à la fermeture de l'onglet.</p>
     <h2>Vos droits</h2>
     <p>Vous pouvez demander l'accès, la correction ou l'effacement de vos données, ou vous opposer à leur utilisation. Adressez-vous à ${echapper(C.contact)}.${C.dpo ? ' Délégué à la protection des données : ' + echapper(C.dpo) + '.' : ''} Vous pouvez aussi introduire une plainte auprès de l'Autorité de protection des données (www.autoriteprotectiondonnees.be).</p>`;
   afficher('vueConfidentialite');
